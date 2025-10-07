@@ -1,0 +1,84 @@
+name: "ASPM-RUNNER"
+on:
+  pull_request:
+    branches:
+      - "main"
+    types:
+      - "opened"
+      - "synchronize"
+      - "reopened"
+  workflow_dispatch:
+    inputs:
+      logLevel:
+        description: "Log level"
+        required: false
+        default: "info"
+
+jobs:
+  scanning:
+    runs-on: "ubuntu-latest"
+    env:
+      workdir: "${{ github.workspace }}/wrkdir"
+      ACCOUNT_ID: "5005"
+      CONNECTOR_ID: "4225"
+      XDG_CONFIG_HOME: "${{ github.workspace }}/wrkdir/.config"
+      SECURIN_LOG_DIR: "${{ github.workspace }}/wrkdir/logs"
+
+    steps:
+      - uses: "actions/checkout@v4"
+        with:
+          path: "${{ env.workdir }}/src"
+
+      - name: Setup scanner directories
+        run: |
+          mkdir -p "${{ env.workdir }}/.config/Securin"
+          mkdir -p "${{ env.workdir }}/logs"
+          chmod -R 755 "${{ env.workdir }}/.config"
+          chmod -R 755 "${{ env.workdir }}/logs"
+
+      - name: Setup AWS and Download Runner
+        run: |
+          # Fetch and configure AWS credentials
+          echo "Fetching AWS credentials..."
+          RESPONSE=$(curl -s -H "API_KEY: ${{ secrets.UAT_API_KEY }}" \
+            "https://apigateway.uat.securin.io/resultapi/api/v1/accounts/${{ env.ACCOUNT_ID }}/aws/_token")
+          
+          ACCESS_KEY=$(echo "$RESPONSE" | jq -r '.accessKey')
+          SECRET_KEY=$(echo "$RESPONSE" | jq -r '.secretKey')
+          SESSION_TOKEN=$(echo "$RESPONSE" | jq -r '.sessionToken')
+          
+          echo "::add-mask::$ACCESS_KEY"
+          echo "::add-mask::$SECRET_KEY"
+          echo "::add-mask::$SESSION_TOKEN"
+          
+          aws configure set aws_access_key_id "$ACCESS_KEY"
+          aws configure set aws_secret_access_key "$SECRET_KEY"
+          aws configure set aws_session_token "$SESSION_TOKEN"
+          aws configure set region "us-west-2"
+          
+          # Download runner
+          SCANNER_URL="s3://securin-uat-shiftleft/scanners/securin-cli/2.0.1/securin-runner"
+          aws s3 cp "$SCANNER_URL" "${{ env.workdir }}/src/ASPMRunner"
+          chmod +x "${{ env.workdir }}/src/ASPMRunner"
+          
+          [ -f "${{ env.workdir }}/src/ASPMRunner" ] && echo "Runner ready" || (echo "Download failed" && exit 1)
+          unset RESPONSE ACCESS_KEY SECRET_KEY SESSION_TOKEN
+
+      - name: Run Scan
+        working-directory: "${{ env.workdir }}/src"
+        env:
+          XDG_CONFIG_HOME: "${{ env.workdir }}/.config"
+          SECURIN_LOG_FILE: "${{ env.workdir }}/logs/securin-cli.log"
+          HOME: "${{ env.workdir }}"
+        run: |
+          touch "${{ env.workdir }}/logs/securin-cli.log"
+          chmod 666 "${{ env.workdir }}/logs/securin-cli.log"
+          
+          ./ASPMRunner scan --connector_id "${{ env.CONNECTOR_ID }}" --account_id "${{ env.ACCOUNT_ID }}" --api_key "${{ secrets.UAT_API_KEY }}" --scan_type SCA,SECRETS,CONTAINER,IAC,MCP
+
+      - name: Upload Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scan-results
+          path: "${{ env.workdir }}/results"
